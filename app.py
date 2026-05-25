@@ -59,8 +59,8 @@ def load_model():
 model = load_model()
 
 ## STREAMLIT UI
-st.title("🛡️ Fraud Detection System")
-st.markdown("Upload a CSV file containing applicant data to identify potential fraud risks.")
+st.title("Predictor de fondeo de clientes registrados")
+st.markdown("Carga un archivo csv con la información de los clientes a analizar.")
 
 uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
 
