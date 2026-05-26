@@ -12,86 +12,157 @@ import scipy
 import sklearn
 from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
 import xgboost
+import os
+import io
+import unicodedata
+import openpyxl
+import streamlit as st
+import joblib
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import classification_report, confusion_matrix
+
+# ── funciones de preprocesamiento ──────────────────────────────
+def remove_accents_and_lowercase(text):
+    if isinstance(text, str):
+        text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8').lower().replace('.', '')
+    return text
+def definir_variables(data):
+  # -------------------------------------------
+  #     Definición de variables inicial
+  # -------------------------------------------
+
+  #Como el 99% de entradas eran de Colombia, vamos filtrar sólo los del país y eliminar la columna
+  data= data[data["pais"].isin(["COL", "Colombia"])].copy()
+  #Dado que ciudad, estado y posicion de empleo tienen una alta cardinalidad, vamos a eliminarlas
+  data.drop(columns=["pais", "ciudad", "state", "employement_position"], inplace=True)
+  data["genero"] = data["genero"].str.lower()
+  #La fecha de registro estaba en formato UTC, mientras que las demás fechas están UTC -5.
+  data["fecha_registro"] = pd.to_datetime(data["fecha_registro"]).dt.tz_convert("America/Bogota").dt.tz_localize(None)
+  #convertir en tipo fecha
+  data["fecha_onboarding_completed"] = pd.to_datetime(data["fecha_onboarding_completed"], format="mixed")
+  data["fecha_apertura_cuenta"] = pd.to_datetime(data["fecha_apertura_cuenta"])
+  data["fecha_nacimiento"] = pd.to_datetime(data["fecha_nacimiento"])
+  #Configuramos nuestra variable objetivo si alguien fondeó o no
+  #data["fondeo"]= data["fecha_fondeo"].notna().astype(int)
+  #data.drop(columns=["fecha_fondeo"], inplace=True)
+  # Obtener las columnas que son strings
+  string_columns = data.select_dtypes(include='object').columns
+  # Limpiar las columnas de tildes y volverlas en minúsculas
+  for col in string_columns:
+      data[col] = data[col].apply(remove_accents_and_lowercase)
+  data["rango-ingresos"] = data["annual_income_min"].astype(str)+ " - " + data["annual_income_max"].astype(str)
+  data["rango-patrimonio"] = data["total_net_worth_min"].astype(str)+ " - " + data["total_net_worth_max"].astype(str)
+  data.drop(columns=["liquid_net_worth_max", "annual_income_min", "annual_income_max", "total_net_worth_min", "total_net_worth_max"], inplace=True)
+  #Se toman estas tipo estatus de empleo
+  data = data[data["employement_status"].isin(["employed", "student", "unemployed", "retired"])]
+  data.drop(columns=["Nivel_inversionista"], inplace=True)
+
+  data = data[data["funding_source"].isin(["employment_income", "investments", "business_income"])]
+
+  # -------------------------------------------
+  #     Creación de variables temporales
+  # -------------------------------------------
+
+  data["edad"] = (data["fecha_apertura_cuenta"] - data["fecha_nacimiento"]).dt.days // 365
+  data = data.dropna(subset=["edad", "fecha_onboarding_completed", "genero"])
+  data["edad"] = data["edad"].astype(int)
+  data["minutos_onboarding_registro"] = (data["fecha_onboarding_completed"] - data["fecha_registro"]).dt.total_seconds() / (60)
+  data["minutos_onboarding_registro"] = data["minutos_onboarding_registro"].astype(int)
+  data["minutos_apertura_cuenta_onboarding"] = (data["fecha_apertura_cuenta"] - data["fecha_onboarding_completed"]).dt.total_seconds() / (60)
+  data["minutos_apertura_cuenta_onboarding"] = data["minutos_apertura_cuenta_onboarding"].astype(int)
+  data["minutos_apertura_cuenta_registro"] = (data["fecha_apertura_cuenta"] - data["fecha_registro"]).dt.total_seconds() / (60)
+  data["minutos_apertura_cuenta_registro"] = data["minutos_apertura_cuenta_registro"].astype(int)
+
+  # -------------------------------------------
+  #   Enriquecimiento de variables temporales
+  # -------------------------------------------
+
+  # Requerimos la fecha_apertura_cuenta antes del drop
+  data['dia_semana_apertura'] = data['fecha_apertura_cuenta'].dt.dayofweek
+
+  # 0 = lunes, 5 = sábado, 6 = domingo
+
+  data['es_fin_de_semana'] = data['fecha_apertura_cuenta'].dt.dayofweek.isin([5, 6]).astype(int).astype("object")
+  data['dia_de_la_semana'] = data['fecha_apertura_cuenta'].dt.dayofweek.astype("object")
+
+  data['mes_apertura'] = data['fecha_apertura_cuenta'].dt.month.astype("object")
+
+  data['trimestre_apertura'] = data['fecha_apertura_cuenta'].dt.quarter.astype("object")
+
+  data['dia_mes_apertura'] = data['fecha_apertura_cuenta'].dt.day.astype("object")
+
+  data['dia_mes_onboarding'] = data['fecha_onboarding_completed'].dt.day.astype("object")
+
+  data['hora_registro'] = data['fecha_registro'].dt.hour
+
+  #Captura de horario
+
+  data['es_horario_laboral'] = data['hora_registro'].between(8, 18).astype(int).astype("object")
+
+  data.drop(columns=["fecha_registro", "fecha_onboarding_completed", "fecha_apertura_cuenta", "fecha_nacimiento"], inplace=True)
+  return data
 
 
-def filter_cols(df):
-  df = df.copy()
-  df = df[df['MartialStatus'] != 'Unknown'].reset_index(drop=True)
-  df = df[df['Gender'] != 'XNA'].reset_index(drop=True)
-  df['Occupation'] = df['Occupation'].replace(['Unemployed', 'Student', 'Businessman', 'Maternity leave'], 'Other')
-  df['RiskLevel'] = df['RiskLevel'].fillna('Unknown')
-  print(f"Duplicates found: {df.duplicated().sum().sum()}")
-  df = df.drop_duplicates()
-  # Separate features if fraud column is present
-  if 'Fraud' in df.columns:
-    X, y = df.drop(columns=['Fraud'], axis=1), df['Fraud']
-  else:
-    X = df
-    y = None
-  return X, y
 
+def variables_definitivas(data):
+  data["fondeo"]= data["fecha_fondeo"].notna().astype(int)
+  data= data.drop(columns=['Unnamed: 0', "Pauta", "fecha_fondeo"])
+  data= definir_variables(data)
+  data = data.drop(columns=[ 'minutos_onboarding_registro', "es_horario_laboral"])
+  X = pd.get_dummies(data.drop(columns=['fondeo']), drop_first=True)
+  y = data['fondeo']
+  return X,y
+# ─────────────────────────────────────────────────────────────────────────────
 
-def map_cols(df):
-  df = df.copy()
-  risk_order = {'LowRisk': 0, 'Risk': 1, 'HighRisk': 2, 'Unknown': -1}
-  edu_order = {'Lower secondary': 0, 'Secondary / secondary special': 1, 'Incomplete higher': 2, 'Higher education': 3, 'Academic degree': 4}
-  gender_map = {'M': 0, 'F': 1}
-  df['RiskLevel'] = df['RiskLevel'].map(risk_order) # Ordinal Encoder
-  df['Education'] = df['Education'].map(edu_order) # Ordinal Encoder
-  df['Gender']= df['Gender'].map(gender_map)
-  return df
-
-
-def transform_num_cols(df):
-  df = df.copy()
-  drop_cols = ['LoanID', 'NumberOfBankAccounts', 'ExperianRating']
-  df = df.drop(drop_cols, axis = 1)
-  return df
-
-## LOAD MODEL
 @st.cache_resource
 def load_model():
-  # Ensure your model file is in the same directory
-  base_path = os.path.dirname(__file__)
-  model_path = os.path.join(base_path, 'fraud_classificator_joblib.joblib')
-  return joblib.load(model_path)
+    base_path = os.path.dirname(__file__)
+    model_path = os.path.join(base_path, 'modelo_random_forest.joblib')  # <── cambia el nombre
+    return joblib.load(model_path)
 
 model = load_model()
 
-## STREAMLIT UI
-st.title("Predictor de fondeo de clientes registrados")
-st.markdown("Carga un archivo csv con la información de los clientes a analizar.")
+# ── UI ────────────────────────────────────────────────────────────────────────
+st.title("📈 Predictor de Fondeo de Clientes")
+st.markdown("Carga un archivo CSV con la información de los clientes a analizar.")
 
-uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+uploaded_file = st.file_uploader("Elige un archivo CSV", type="csv")
 
 if uploaded_file is not None:
-    # Read data
     input_df = pd.read_csv(uploaded_file)
-    X, y = filter_cols(input_df)
+    X, y = variables_definitivas(input_df)
 
     upload_key = f"{uploaded_file.name}_{uploaded_file.size}"
-    if st.session_state.get("fraud_app_upload_key") != upload_key:
-        st.session_state["fraud_app_upload_key"] = upload_key
-        st.session_state["fraud_app_results"] = None
+    if st.session_state.get("upload_key") != upload_key:
+        st.session_state["upload_key"] = upload_key
+        st.session_state["results"] = None
 
-    st.write("### Data Preview")
+    st.write("### Vista previa de los datos")
     st.dataframe(X.head())
     if y is not None:
-        st.write("### Target Variable Preview")
+        st.write("### Variable objetivo")
         st.dataframe(y.head())
 
-    if st.button("Run Fraud Analysis"):
+    if st.button("Ejecutar predicción"):
         try:
-            data_to_predict = X.copy()
-            predictions = model.predict(data_to_predict)
-            probabilities = model.predict_proba(data_to_predict)[:, 1]
+            probabilities = model.predict_proba(X)[:, 1]
+            predictions = model.predict(X)
+
             results_df = X.copy()
-            results_df["Is_Fraud"] = [
-                "Human Review" if p >= 0.5 and p <= 0.78 else "Fraud" if p > 0.78 else "Not Fraud"
+
+            # Ajusta los umbrales según tu modelo
+            results_df["Prediccion"] = [
+                "Revisión Manual" if 0.4 <= p <= 0.6
+                else "Fondeará" if p > 0.6
+                else "No Fondeará"
                 for p in probabilities
             ]
-            results_df["Fraud_Probability"] = [f"{p:.2%}" for p in probabilities]
-            st.session_state["fraud_app_results"] = {
+            results_df["Probabilidad_Fondeo"] = [f"{p:.2%}" for p in probabilities]
+
+            st.session_state["results"] = {
                 "results_df": results_df,
                 "input_columns": list(input_df.columns),
                 "y": y,
@@ -99,93 +170,76 @@ if uploaded_file is not None:
                 "probabilities": probabilities,
             }
         except Exception as e:
-            st.session_state["fraud_app_results"] = None
-            st.error(f"An error occurred during processing: {e}")
-            st.info("Ensure the CSV has all the required columns used during model training.")
+            st.session_state["results"] = None
+            st.error(f"Error durante el procesamiento: {e}")
 
-    cached = st.session_state.get("fraud_app_results")
+    cached = st.session_state.get("results")
     if cached is not None:
-        results_df = cached["results_df"]
+        results_df    = cached["results_df"]
         input_columns = cached["input_columns"]
-        y_cached = cached["y"]
-        predictions = cached["predictions"]
+        y_cached      = cached["y"]
+        predictions   = cached["predictions"]
 
+        # ── Métricas (solo si hay etiquetas reales) ───────────────────────────
         if y_cached is not None:
+            st.write("### Matriz de Confusión")
             cm = confusion_matrix(y_cached, predictions, labels=[0, 1])
-            sns.set_theme(style="whitegrid")
-            fig, ax = plt.subplots(figsize=(10, 6))
-            sns.heatmap(
-                cm,
-                annot=True,
-                fmt="d",
-                cmap="Blues",
-                ax=ax,
-                xticklabels=["Not Fraud", "Fraud"],
-                yticklabels=["Not Fraud", "Fraud"],
-                annot_kws={"size": 14},
-            )
-            ax.set_title("Confusion Matrix: Fraud Detection Analysis", fontsize=12)
-            ax.set_xlabel("Predicted Labels", fontsize=10)
-            ax.set_ylabel("True Labels", fontsize=10)
-            st.write("### Confusion Matrix")
+            fig, ax = plt.subplots(figsize=(6, 4))
+            sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax,
+                        xticklabels=["No Fondeó", "Fondeó"],
+                        yticklabels=["No Fondeó", "Fondeó"],
+                        annot_kws={"size": 14})
+            ax.set_title("Matriz de Confusión")
+            ax.set_xlabel("Predicho"); ax.set_ylabel("Real")
             st.pyplot(fig)
-            st.write("### Classification Report")
-            report = classification_report(y_cached, predictions)
-            st.code(report, language="text")
-            st.write("### Feature Importance")
-            feature_importances = model.named_steps["model"].feature_importances_
-            feature_names = model.named_steps["model"].feature_names_in_
-            feature_importances_df = pd.DataFrame(
-                {"Feature": feature_names, "Importance": feature_importances}
-            ).sort_values(by="Importance", ascending=False)
-            top_10_features = feature_importances_df.head(10)
-            sns.set_theme(style="whitegrid")
-            fig, ax = plt.subplots(figsize=(10, 6))
-            sns.barplot(
-                data=top_10_features,
-                x="Importance",
-                y="Feature",
-                ax=ax,
-                palette="viridis",
-            )
-            ax.set_title("Top 10 Most Influential Features for Fraud Detection", fontsize=16)
-            ax.set_xlabel("Importance Score", fontsize=14)
-            ax.set_ylabel("Feature", fontsize=14)
+
+            st.write("### Reporte de Clasificación")
+            st.code(classification_report(y_cached, predictions,
+                                          target_names=["No Fondeó", "Fondeó"]))
+
+            st.write("### Importancia de Variables (Top 10)")
+            # Random Forest expone feature_importances_ directamente
+            rf = model.named_steps["model"]          # si usas Pipeline
+            # rf = model                             # si no usas Pipeline
+            feat_imp = pd.DataFrame({
+                "Feature": rf.feature_names_in_,
+                "Importance": rf.feature_importances_
+            }).sort_values("Importance", ascending=False).head(10)
+
+            fig2, ax2 = plt.subplots(figsize=(10, 6))
+            sns.barplot(data=feat_imp, x="Importance", y="Feature",
+                        ax=ax2, palette="viridis")
+            ax2.set_title("Top 10 Variables más Influyentes")
             sns.despine(left=True, bottom=True)
-            st.pyplot(fig)
+            st.pyplot(fig2)
 
-        st.success("Analysis Complete!")
-        st.write("### Prediction Results")
-        vc = results_df["Is_Fraud"].value_counts(normalize=True)
-        st.write(
-            f"Not Fraud: {results_df['Is_Fraud'].value_counts()['Not Fraud']} ({vc['Not Fraud']:.2%})"
-        )
-        st.write(f"Fraud: {results_df['Is_Fraud'].value_counts()['Fraud']} ({vc['Fraud']:.2%})")
-        st.write(
-            f"Human Review: {results_df['Is_Fraud'].value_counts()['Human Review']} ({vc['Human Review']:.2%})"
-        )
+        # ── Resultados ────────────────────────────────────────────────────────
+        st.success("¡Análisis completo!")
+        st.write("### Resultados de Predicción")
+        vc = results_df["Prediccion"].value_counts(normalize=True)
+        for label in ["Fondeará", "No Fondeará", "Revisión Manual"]:
+            if label in results_df["Prediccion"].value_counts():
+                n = results_df["Prediccion"].value_counts()[label]
+                st.write(f"**{label}:** {n} ({vc[label]:.2%})")
+
         st.dataframe(
-            results_df[["Is_Fraud", "Fraud_Probability"] + [c for c in input_columns if c != "Fraud"]]
+            results_df[["Prediccion", "Probabilidad_Fondeo"] +
+                        [c for c in input_columns if c not in ("fondeo", "fecha_fondeo")]]
         )
 
-        download_option = st.selectbox(
-            "Download Options", ["All Predictions", "Human Review"], key="fraud_download_option"
-        )
-        format_option = st.selectbox(
-            "File format", ["CSV", "Excel"], key="fraud_download_format"
-        )
+        # ── Descarga ──────────────────────────────────────────────────────────
+        download_option = st.selectbox("Descargar", ["Todas las predicciones", "Solo Revisión Manual"],
+                                       key="dl_option")
+        format_option   = st.selectbox("Formato", ["CSV", "Excel"], key="dl_format")
 
-        if download_option == "All Predictions":
-            out_df = results_df
-            base_name = "final_fraud_predictions"
-        else:
-            out_df = results_df[results_df["Is_Fraud"] == "Human Review"]
-            base_name = "human_review_predictions"
+        out_df    = results_df if download_option == "Todas las predicciones" \
+                    else results_df[results_df["Prediccion"] == "Revisión Manual"]
+        base_name = "predicciones_fondeo" if download_option == "Todas las predicciones" \
+                    else "revision_manual"
 
         if format_option == "CSV":
             file_data = out_df.to_csv(index=False).encode("utf-8")
-            file_name = f"{base_name}.csv"
-            mime = "text/csv"
+            file_name, mime = f"{base_name}.csv", "text/csv"
         else:
             buf = io.BytesIO()
             out_df.to_excel(buf, index=False, engine="openpyxl")
@@ -193,12 +247,6 @@ if uploaded_file is not None:
             file_name = f"{base_name}.xlsx"
             mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
-        dl_key = f"fraud_dl_{'all' if download_option == 'All Predictions' else 'human'}_{format_option.lower()}"
-        st.download_button(
-            label=f"Download {download_option} as {format_option}",
-            data=file_data,
-            file_name=file_name,
-            mime=mime,
-            key=dl_key,
-        )
-
+        st.download_button(f"Descargar {download_option} ({format_option})",
+                           data=file_data, file_name=file_name, mime=mime,
+                           key=f"dl_{download_option}_{format_option}")
