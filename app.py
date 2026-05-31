@@ -227,8 +227,7 @@ if uploaded_file is not None:
                 st.write(f"**{label}:** {n} ({vc[label]:.2%})")
 
         st.dataframe(
-            results_df[["Prediccion", "Probabilidad_Fondeo"] +
-                        [c for c in input_columns if c not in ("fondeo", "fecha_fondeo")]]
+            results_df[["Prediccion", "Probabilidad_Fondeo"]]
         )
 
         # ── Descarga ──────────────────────────────────────────────────────────
