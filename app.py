@@ -206,7 +206,7 @@ if uploaded_file is not None:
             rf = model.named_steps["model"]          # si usas Pipeline
             # rf = model                             # si no usas Pipeline
             feat_imp = pd.DataFrame({
-                "Feature": rf.feature_names_in_,
+                "Feature": feature_columns,
                 "Importance": rf.feature_importances_
             }).sort_values("Importance", ascending=False).head(10)
 
