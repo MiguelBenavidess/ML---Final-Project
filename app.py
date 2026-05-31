@@ -113,17 +113,21 @@ def variables_definitivas(data):
   data= definir_variables(data)
   data = data.drop(columns=[ 'minutos_onboarding_registro', "es_horario_laboral"])
   X = pd.get_dummies(data.drop(columns=['fondeo']), drop_first=True)
+  X = X.reindex(columns=feature_columns, fill_value=0)
   y = data['fondeo']
-  return X,y
+  return X, y
 # ─────────────────────────────────────────────────────────────────────────────
 
 @st.cache_resource
 def load_model():
     base_path = os.path.dirname(__file__)
-    model_path = os.path.join(base_path, 'modelo_random_forest.joblib')  # <── cambia el nombre
-    return joblib.load(model_path)
+    model_path = os.path.join(base_path, 'modelo_random_forest.joblib')
+    columns_path = os.path.join(base_path, 'feature_columns.joblib')
+    model = joblib.load(model_path)
+    feature_columns = joblib.load(columns_path)
+    return model, feature_columns
 
-model = load_model()
+model, feature_columns = load_model()
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 st.title("📈 Predictor de Fondeo de Clientes")
